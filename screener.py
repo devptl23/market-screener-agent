@@ -20,6 +20,8 @@ MIN_TARGET_RETURN = 0.15
 MAX_TARGET_RETURN = 0.20
 MIN_REWARD_RISK = 3.0
 MAX_REWARD_RISK = 5.0
+TARGET_PROFIT_MIN = 200
+TARGET_PROFIT_MAX = 500
 
 
 def to_float(value):
@@ -93,6 +95,7 @@ def analyze_market_data():
 
     # Pre-screen candidates for trend
     qualified_candidates = []
+    watchlist_candidates = []
     for item in WATCHLIST:
         t = item["ticker"]
         bm = item["benchmark"]
@@ -134,13 +137,8 @@ def analyze_market_data():
                 t_close.diff().abs().rolling(14).mean()
             )
             reward_risk = (target_price - t_px) / atr14 if atr14 else 0
-            
-            if (
-                t_px > t_ema20 > t_sma50
-                and t_perf > bm_perf
-                and MIN_REWARD_RISK <= reward_risk <= MAX_REWARD_RISK
-            ):
-                qualified_candidates.append({
+
+            candidate = {
                     "ticker": t,
                     "price": round(t_px, 2),
                     "benchmark": bm,
@@ -151,35 +149,56 @@ def analyze_market_data():
                     "target_return": f"{target_return:.0%}",
                     "atr14": round(atr14, 2),
                     "reward_to_risk": round(reward_risk, 2)
-                })
+            }
 
-    return portfolio_metrics, qualified_candidates
+            if t_px > t_ema20 > t_sma50 and t_perf > bm_perf:
+                watchlist_candidates.append(candidate)
+                if MIN_REWARD_RISK <= reward_risk <= MAX_REWARD_RISK:
+                    qualified_candidates.append(candidate)
+
+    watchlist_candidates.sort(
+        key=lambda item: (item["reward_to_risk"], item["target_return"]),
+        reverse=True
+    )
+    return portfolio_metrics, qualified_candidates, watchlist_candidates[:3]
 
 # -------------------------------------------------------------
 # STEP C: GENERATE AI TRADE REPORT
 # -------------------------------------------------------------
-def generate_trade_report(macro_favorable, macro_data, portfolio_data, candidates):
+def generate_trade_report(
+    macro_favorable,
+    macro_data,
+    portfolio_data,
+    candidates,
+    watchlist_candidates
+):
     client = genai.Client(api_key=GEMINI_API_KEY)
     
     prompt = f"""
-    You are an expert quantitative swing trader producing a concise Discord report. Evaluate only the supplied live data. Do not invent prices, indicators, market caps, news, support levels, or institutional activity. Do not force a trade; return NO TRADE when the data does not support every requirement.
+    You are an expert quantitative swing trader producing a detailed but well-structured Discord report. Evaluate only the supplied live data. Do not invent prices, indicators, market caps, news, support levels, or institutional activity. Do not force a trade; return NO TRADE when the data does not support every requirement.
 
     INPUT DATA:
     - Macro Regime Favorable: {macro_favorable}
     - Macro Status: {json.dumps(macro_data)}
     - User Portfolio: {json.dumps(portfolio_data)}
     - Pre-Screened Candidates: {json.dumps(candidates)}
+    - Promising Watchlist Candidates (not necessarily entry-ready): {json.dumps(watchlist_candidates)}
+    - Desired Gross Profit Range Per Trade: ${TARGET_PROFIT_MIN}-${TARGET_PROFIT_MAX}
 
     CRITERIA TO ENFORCE:
     1. If macro is unfavorable, show a red capital-preservation alert and recommend NO TRADE unless a valid exception is supported by the data.
-    2. Audit holdings using only the supplied fields. Never give an "immediate exit" order; label the setup as BROKEN, WATCH, or HOLD and state the objective reason.
+    2. Audit every holding using only the supplied fields. For each holding, show ticker, current price, average cost, P&L, below-50-SMA status, classification (BROKEN/WATCH/HOLD), objective reasoning, and a practical action. Do not present a recommendation as guaranteed financial advice.
     3. Only consider candidates with market cap between $300M and $5B and average dollar volume above $20M. Reject microcaps, thinly traded names, pump-and-dump setups, and extended or parabolic price action.
-    4. Pick 0-2 candidates only when the setup supports a 15% to 20% target and a strict 1:3 to 1:5 reward-to-risk ratio. Use the supplied target and reward-to-risk values; do not replace them with 1:2 setups.
-    5. A 15% to 20% return is a target, never a promise. State the invalidation condition and main risk for each trade.
+    4. Pick 0-2 candidates only when the final target supports a 15% to 20% expected move AND the final reward-to-risk ratio is at least 1:3. Prefer 1:3 to 1:5. Never show a 1:2 or 1:2.8 trade as valid. If the supplied candidate has reward_to_risk below 3, reject it and say why.
+    5. Use the supplied price, target_price, target_return, atr14, market_cap, avg_dollar_volume, and reward_to_risk. Use current price as the proposed entry unless the data clearly supports a different entry. For a provisional stop, use entry minus one ATR14 for a long setup and show the calculation. Do not invent chart support or resistance.
+    6. A 15% to 20% return is a target, never a promise. State the invalidation condition, position-sizing caution, and main risk for each trade.
+    7. Even when there are no valid trades, show up to three promising watchlist candidates from the supplied watchlist data. Label each WATCH ONLY and explain whether it failed the 1:3 R:R rule or another requirement. Do not present watchlist names as buy signals.
+    8. The desired gross profit is $200-$500 per trade, but do not guess share count or account size. If account size and risk budget are not supplied, state that exact position sizing requires those inputs. You may show the formula: shares = desired dollar profit / (target price - entry price).
 
     DISCORD FORMAT RULES:
     - Use Discord Markdown only. Do not use HTML, LaTeX, or wide ASCII tables.
-    - Keep the report under 3,500 characters and make the first section scannable in under 10 seconds.
+    - Keep the report detailed, but use short paragraphs, bullets, and separators so it remains easy to scan.
+    - Put a quick dashboard first, followed by the complete detailed analysis.
     - Use exactly these sections and numbering; do not repeat numbers:
 
     **MARKET SWEEP | [GREEN LIGHT / CAUTION / RED LIGHT]**
@@ -191,21 +210,33 @@ def generate_trade_report(macro_favorable, macro_data, portfolio_data, candidate
     `Candidates: [count] | Valid setups: [count] | Target: 15-20% | R:R: 1:3-1:5`
     `Best idea: [ticker or NONE] | Risk: [LOW/MODERATE/HIGH]`
 
-    **PORTFOLIO**
-    - `TICKER` | P&L | Trend | **Action:** HOLD / WATCH / REDUCE
+    **PORTFOLIO AUDIT & CAPITAL REALLOCATION**
+    | Ticker | Current | Avg Cost | P&L | Below 50 SMA | Action |
+    Include one row for every holding, followed by a detailed diagnostic paragraph for every holding.
 
-    **TRADE SETUPS**
-    For each valid setup, use this compact card:
-    **#1 TICKER | [LONG / NO TRADE]**
+    **TOP QUANTITATIVE SWING TRADE SETUPS**
+    Start with a compact side-by-side-style summary using separate blocks, then provide detailed analysis for every selected setup:
+    **#1 TICKER | LONG**
+    `Market cap: $X | Avg dollar volume: $X | Benchmark: TICKER`
     `Entry: $X | Stop: $Y | Target: $Z`
-    `Risk: X% | Expected return: Y% | R:R: 1:Z`
-    `Why: one sentence. Invalidation: one sentence.`
+    `Risk: $X (X%) | Expected return: X% | Final R:R: 1:X`
+    `Setup thesis:` two or three sentences based only on the supplied data.
+    `Entry trigger:` explain what must happen before entry.
+    `Invalidation:` explain the exact condition that cancels the trade.
+    `Trade management:` explain partial profit-taking and stop management without guaranteeing a result.
+    Include a clear **REJECTED / NO TRADE** subsection for candidates that fail the 1:3 minimum.
 
-    **RISK RULES**
-    `Risk per trade: [state only if supplied] | Never risk more than planned | 15-20% is not guaranteed.`
+    **PROMISING WATCHLIST | NOT ENTRY SIGNALS**
+    Show up to three names even when there are no valid trades:
+    `TICKER | Why promising | Current filter status | What must improve before entry`
+    Clearly label every one **WATCH ONLY**.
 
-    - If there are no valid setups, write **NO VALID SETUPS** and explain in one sentence.
-    - Use consistent dollar formatting and short lines. Avoid long paragraphs, repeated disclaimers, and speculative claims.
+    **EXECUTION & RISK RULES**
+    Include capital-reallocation considerations, stop-loss governance, position-sizing caution, and what to do if Target 1 is reached. State clearly that the 15-20% objective is not guaranteed.
+
+    - If there are no valid setups, write **NO VALID SETUPS** and explain which filter failed.
+    - Use consistent dollar formatting, readable Markdown tables, headings, and horizontal separators.
+    - Preserve all supplied macro and portfolio information; do not omit details merely to shorten the message.
     """
 
     config = types.GenerateContentConfig(
@@ -278,6 +309,12 @@ def send_to_discord(text):
 
 if __name__ == "__main__":
     is_macro_ok, macro_info = check_macro_regime()
-    portfolio_info, candidates_info = analyze_market_data()
-    report = generate_trade_report(is_macro_ok, macro_info, portfolio_info, candidates_info)
+    portfolio_info, candidates_info, watchlist_info = analyze_market_data()
+    report = generate_trade_report(
+        is_macro_ok,
+        macro_info,
+        portfolio_info,
+        candidates_info,
+        watchlist_info
+    )
     send_to_discord(report)
