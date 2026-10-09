@@ -10,7 +10,7 @@ from google.genai import types
 # -------------------------------------------------------------
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-pro-preview")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 
 def to_float(value):
@@ -112,6 +112,22 @@ def analyze_market_data():
 # STEP C: GENERATE AI TRADE REPORT
 # -------------------------------------------------------------
 def generate_trade_report(macro_favorable, macro_data, portfolio_data, candidates):
+    def fallback_report(reason):
+        macro_line = "FAVORABLE" if macro_favorable else "UNFAVORABLE"
+        broken_positions = [p["ticker"] for p in portfolio_data if p.get("below_50sma")]
+        top_candidates = [c["ticker"] for c in candidates[:2]]
+        return (
+            "⚠️ AI report fallback\n"
+            f"Reason: {reason}\n\n"
+            f"Macro regime: {macro_line}\n"
+            f"Portfolio positions below 50SMA: {', '.join(broken_positions) if broken_positions else 'None'}\n"
+            f"Top pre-screened candidates: {', '.join(top_candidates) if top_candidates else 'None'}\n"
+            "Action: Review risk, then execute only if setup quality and risk/reward are acceptable."
+        )
+
+    if not GEMINI_API_KEY:
+        return fallback_report("Missing GEMINI_API_KEY")
+
     client = genai.Client(api_key=GEMINI_API_KEY)
     
     prompt = f"""
@@ -129,16 +145,19 @@ def generate_trade_report(macro_favorable, macro_data, portfolio_data, candidate
     3. Pick the top 1-2 candidates meeting 1:2 to 1:3 Risk-to-Reward parameters with strict Entry, Stop Loss, and Targets.
     """
 
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            thinking_config=types.ThinkingConfig(
-                thinking_level="high"
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(
+                    thinking_level="high"
+                )
             )
         )
-    )
-    return response.text
+    except Exception as exc:
+        return fallback_report(f"Gemini request failed ({exc.__class__.__name__})")
+    return response.text or fallback_report("Gemini returned empty content")
 
 # -------------------------------------------------------------
 # STEP D: SEND TO DISCORD
