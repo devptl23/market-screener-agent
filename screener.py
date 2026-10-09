@@ -13,6 +13,13 @@ DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-pro-preview")
 GEMINI_FALLBACK_MODEL = os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-3.8-flash")
+MIN_AVG_DOLLAR_VOLUME = 20_000_000
+MIN_SMALL_CAP_MARKET_CAP = 300_000_000
+MAX_SMALL_CAP_MARKET_CAP = 5_000_000_000
+MIN_TARGET_RETURN = 0.15
+MAX_TARGET_RETURN = 0.20
+MIN_REWARD_RISK = 3.0
+MAX_REWARD_RISK = 5.0
 
 
 def to_float(value):
@@ -29,15 +36,17 @@ CURRENT_PORTFOLIO = [
 ]
 
 WATCHLIST = [
-    {"ticker": "NVDA", "benchmark": "SMH"},
-    {"ticker": "AVGO", "benchmark": "SMH"},
-    {"ticker": "AMD",  "benchmark": "SMH"},
-    {"ticker": "MSFT", "benchmark": "XLK"},
-    {"ticker": "AAPL", "benchmark": "XLK"},
-    {"ticker": "AMZN", "benchmark": "XLY"},
-    {"ticker": "META", "benchmark": "XLC"},
-    {"ticker": "PLTR", "benchmark": "XLK"},
-    {"ticker": "TSLA", "benchmark": "XLY"},
+    {"ticker": "ACLS", "benchmark": "SMH"},
+    {"ticker": "AMBA", "benchmark": "SMH"},
+    {"ticker": "ARLO", "benchmark": "XLK"},
+    {"ticker": "BL", "benchmark": "XLK"},
+    {"ticker": "CELH", "benchmark": "XLP"},
+    {"ticker": "FN", "benchmark": "SMH"},
+    {"ticker": "PLAB", "benchmark": "SMH"},
+    {"ticker": "PUBM", "benchmark": "XLC"},
+    {"ticker": "RAMP", "benchmark": "XLK"},
+    {"ticker": "TMDX", "benchmark": "XLV"},
+    {"ticker": "VITL", "benchmark": "XLP"},
 ]
 
 # -------------------------------------------------------------
@@ -87,25 +96,61 @@ def analyze_market_data():
     for item in WATCHLIST:
         t = item["ticker"]
         bm = item["benchmark"]
-        hist = yf.download([t, bm], period="3mo", interval="1d", progress=False)["Close"]
-        if t in hist and bm in hist:
-            t_px = to_float(hist[t])
-            t_ema20 = to_float(hist[t].ewm(span=20).mean())
-            t_sma50 = to_float(hist[t].rolling(50).mean())
+        try:
+            market_cap = float(yf.Ticker(t).fast_info["market_cap"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        if not MIN_SMALL_CAP_MARKET_CAP <= market_cap <= MAX_SMALL_CAP_MARKET_CAP:
+            continue
+
+        raw_data = yf.download(
+            [t, bm], period="3mo", interval="1d", progress=False
+        )
+        close = raw_data["Close"]
+        volume = raw_data["Volume"]
+        if t in close and bm in close:
+            t_close = close[t].dropna()
+            t_volume = volume[t].reindex(t_close.index).fillna(0)
+            t_px = to_float(t_close)
+            t_ema20 = to_float(t_close.ewm(span=20).mean())
+            t_sma50 = to_float(t_close.rolling(50).mean())
+            avg_dollar_volume = to_float(
+                (t_close * t_volume).rolling(20).mean()
+            )
+
+            if avg_dollar_volume < MIN_AVG_DOLLAR_VOLUME:
+                continue
             
             # Check 3-month relative performance vs sector ETF
-            t_first_px = to_float(hist[t].iloc[0])
-            bm_first_px = to_float(hist[bm].iloc[0])
-            bm_last_px = to_float(hist[bm])
+            t_first_px = to_float(t_close.iloc[0])
+            bm_first_px = to_float(close[bm].dropna().iloc[0])
+            bm_last_px = to_float(close[bm])
             t_perf = (t_px - t_first_px) / t_first_px
             bm_perf = (bm_last_px - bm_first_px) / bm_first_px
+            target_return = MIN_TARGET_RETURN
+            target_price = t_px * (1 + target_return)
+            atr14 = to_float(
+                t_close.diff().abs().rolling(14).mean()
+            )
+            reward_risk = (target_price - t_px) / atr14 if atr14 else 0
             
-            if t_px > t_ema20 > t_sma50 and t_perf > bm_perf:
+            if (
+                t_px > t_ema20 > t_sma50
+                and t_perf > bm_perf
+                and MIN_REWARD_RISK <= reward_risk <= MAX_REWARD_RISK
+            ):
                 qualified_candidates.append({
                     "ticker": t,
                     "price": round(t_px, 2),
                     "benchmark": bm,
-                    "outperforming_benchmark": True
+                    "market_cap": round(market_cap),
+                    "outperforming_benchmark": True,
+                    "avg_dollar_volume": round(avg_dollar_volume),
+                    "target_price": round(target_price, 2),
+                    "target_return": f"{target_return:.0%}",
+                    "atr14": round(atr14, 2),
+                    "reward_to_risk": round(reward_risk, 2)
                 })
 
     return portfolio_metrics, qualified_candidates
@@ -117,7 +162,7 @@ def generate_trade_report(macro_favorable, macro_data, portfolio_data, candidate
     client = genai.Client(api_key=GEMINI_API_KEY)
     
     prompt = f"""
-    You are an expert quantitative swing trader. Evaluate this live data and provide recommendations following the user's strict swing criteria.
+    You are an expert quantitative swing trader producing a concise Discord report. Evaluate only the supplied live data. Do not invent prices, indicators, market caps, news, support levels, or institutional activity. Do not force a trade; return NO TRADE when the data does not support every requirement.
 
     INPUT DATA:
     - Macro Regime Favorable: {macro_favorable}
@@ -126,9 +171,41 @@ def generate_trade_report(macro_favorable, macro_data, portfolio_data, candidate
     - Pre-Screened Candidates: {json.dumps(candidates)}
 
     CRITERIA TO ENFORCE:
-    1. If macro is unfavorable, issue a capital preservation alert.
-    2. Audit user holdings: Identify broken charts (trading below 50 SMA or heavy underperformance) and suggest reallocation.
-    3. Pick the top 1-2 candidates meeting 1:2 to 1:3 Risk-to-Reward parameters with strict Entry, Stop Loss, and Targets.
+    1. If macro is unfavorable, show a red capital-preservation alert and recommend NO TRADE unless a valid exception is supported by the data.
+    2. Audit holdings using only the supplied fields. Never give an "immediate exit" order; label the setup as BROKEN, WATCH, or HOLD and state the objective reason.
+    3. Only consider candidates with market cap between $300M and $5B and average dollar volume above $20M. Reject microcaps, thinly traded names, pump-and-dump setups, and extended or parabolic price action.
+    4. Pick 0-2 candidates only when the setup supports a 15% to 20% target and a strict 1:3 to 1:5 reward-to-risk ratio. Use the supplied target and reward-to-risk values; do not replace them with 1:2 setups.
+    5. A 15% to 20% return is a target, never a promise. State the invalidation condition and main risk for each trade.
+
+    DISCORD FORMAT RULES:
+    - Use Discord Markdown only. Do not use HTML, LaTeX, or wide ASCII tables.
+    - Keep the report under 3,500 characters and make the first section scannable in under 10 seconds.
+    - Use exactly these sections and numbering; do not repeat numbers:
+
+    **MARKET SWEEP | [GREEN LIGHT / CAUTION / RED LIGHT]**
+    `As of: [date/time if supplied]`
+    `SPY [BULLISH/BEARISH] | QQQ [BULLISH/BEARISH] | SMH [BULLISH/BEARISH]`
+    `Action: [LONGS ALLOWED / REDUCE RISK / NO NEW LONGS]`
+
+    **QUICK TAKE**
+    `Candidates: [count] | Valid setups: [count] | Target: 15-20% | R:R: 1:3-1:5`
+    `Best idea: [ticker or NONE] | Risk: [LOW/MODERATE/HIGH]`
+
+    **PORTFOLIO**
+    - `TICKER` | P&L | Trend | **Action:** HOLD / WATCH / REDUCE
+
+    **TRADE SETUPS**
+    For each valid setup, use this compact card:
+    **#1 TICKER | [LONG / NO TRADE]**
+    `Entry: $X | Stop: $Y | Target: $Z`
+    `Risk: X% | Expected return: Y% | R:R: 1:Z`
+    `Why: one sentence. Invalidation: one sentence.`
+
+    **RISK RULES**
+    `Risk per trade: [state only if supplied] | Never risk more than planned | 15-20% is not guaranteed.`
+
+    - If there are no valid setups, write **NO VALID SETUPS** and explain in one sentence.
+    - Use consistent dollar formatting and short lines. Avoid long paragraphs, repeated disclaimers, and speculative claims.
     """
 
     config = types.GenerateContentConfig(
@@ -180,8 +257,17 @@ def generate_trade_report(macro_favorable, macro_data, portfolio_data, candidate
 # STEP D: SEND TO DISCORD
 # -------------------------------------------------------------
 def send_to_discord(text):
-    # Discord limits messages to 2000 characters; split if necessary
-    chunks = [text[i:i+1900] for i in range(0, len(text), 1900)]
+    # Keep Discord messages below its limit without cutting a line in half.
+    chunks = []
+    current_chunk = ""
+    for line in text.splitlines(keepends=True):
+        if current_chunk and len(current_chunk) + len(line) > 1900:
+            chunks.append(current_chunk.rstrip())
+            current_chunk = ""
+        current_chunk += line
+    if current_chunk.strip():
+        chunks.append(current_chunk.rstrip())
+
     for chunk in chunks:
         requests.post(DISCORD_WEBHOOK_URL, json={"content": chunk})
 
