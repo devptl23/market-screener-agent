@@ -221,9 +221,9 @@ def generate_trade_report(macro_favorable, macro_data, portfolio_data, candidate
             config=config
         )
         return response.text
-    except errors.ClientError as error:
+    except errors.APIError as error:
         status_code = getattr(error, "code", getattr(error, "status_code", None))
-        if status_code != 429 or GEMINI_MODEL == GEMINI_FALLBACK_MODEL:
+        if status_code not in (429, 503) or GEMINI_MODEL == GEMINI_FALLBACK_MODEL:
             raise
 
         # Pro may have no free-tier quota; retry with the configured fallback.
@@ -234,7 +234,7 @@ def generate_trade_report(macro_favorable, macro_data, portfolio_data, candidate
                 config=config
             )
             return response.text
-        except errors.ClientError as fallback_error:
+        except errors.APIError as fallback_error:
             fallback_status = getattr(
                 fallback_error,
                 "code",
@@ -245,6 +245,11 @@ def generate_trade_report(macro_favorable, macro_data, portfolio_data, candidate
                     "Gemini quota is exhausted for both "
                     f"{GEMINI_MODEL} and {GEMINI_FALLBACK_MODEL}. "
                     "Enable billing or wait for the quota to reset."
+                )
+            if fallback_status == 503:
+                return (
+                    f"Gemini is temporarily unavailable for both {GEMINI_MODEL} "
+                    f"and {GEMINI_FALLBACK_MODEL}. Try the next scheduled sweep."
                 )
             if fallback_status == 404:
                 return (
