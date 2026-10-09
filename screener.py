@@ -12,6 +12,13 @@ DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-pro-preview")
 
+
+def to_float(value):
+    """Convert a scalar or one-column pandas object returned by yfinance to float."""
+    while hasattr(value, "iloc"):
+        value = value.iloc[-1]
+    return float(value)
+
 # Replace or update these with your exact active positions
 CURRENT_PORTFOLIO = [
     {"ticker": "IREN", "shares": 83, "avg_cost": 64.36, "currency": "USD"},
@@ -41,8 +48,8 @@ def check_macro_regime():
     favorable = True
     
     for ticker in macro_tickers:
-        ema20 = data[ticker].ewm(span=20, adjust=False).mean().iloc[-1]
-        price = data[ticker].iloc[-1]
+        ema20 = to_float(data[ticker].ewm(span=20, adjust=False).mean())
+        price = to_float(data[ticker])
         is_bullish = bool(price > ema20)
         if not is_bullish:
             favorable = False
@@ -62,8 +69,8 @@ def analyze_market_data():
         t = item["ticker"]
         hist = yf.download(t, period="3mo", interval="1d", progress=False)["Close"]
         if not hist.empty:
-            current_px = float(hist.iloc[-1])
-            sma50 = float(hist.rolling(50).mean().iloc[-1])
+            current_px = to_float(hist)
+            sma50 = to_float(hist.rolling(50).mean())
             pnl_pct = ((current_px - item["avg_cost"]) / item["avg_cost"]) * 100
             portfolio_metrics.append({
                 "ticker": t,
@@ -80,13 +87,16 @@ def analyze_market_data():
         bm = item["benchmark"]
         hist = yf.download([t, bm], period="3mo", interval="1d", progress=False)["Close"]
         if t in hist and bm in hist:
-            t_px = float(hist[t].iloc[-1])
-            t_ema20 = float(hist[t].ewm(span=20).mean().iloc[-1])
-            t_sma50 = float(hist[t].rolling(50).mean().iloc[-1])
+            t_px = to_float(hist[t])
+            t_ema20 = to_float(hist[t].ewm(span=20).mean())
+            t_sma50 = to_float(hist[t].rolling(50).mean())
             
             # Check 3-month relative performance vs sector ETF
-            t_perf = (t_px - float(hist[t].iloc[0])) / float(hist[t].iloc[0])
-            bm_perf = (float(hist[bm].iloc[-1]) - float(hist[bm].iloc[0])) / float(hist[bm].iloc[0])
+            t_first_px = to_float(hist[t].iloc[0])
+            bm_first_px = to_float(hist[bm].iloc[0])
+            bm_last_px = to_float(hist[bm])
+            t_perf = (t_px - t_first_px) / t_first_px
+            bm_perf = (bm_last_px - bm_first_px) / bm_first_px
             
             if t_px > t_ema20 > t_sma50 and t_perf > bm_perf:
                 qualified_candidates.append({
