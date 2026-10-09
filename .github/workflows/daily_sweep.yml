@@ -2,9 +2,16 @@ name: Daily Pre-Market Sweep
 
 on:
   schedule:
-    # 13:00 UTC corresponds to 9:00 AM EDT / 8:00 AM EST (Monday - Friday)
-    - cron: '0 13 * * 1-5'
-  workflow_dispatch: # Allows you to click a button and run it manually anytime
+    # 8:30 AM ET
+    - cron: "30 12 * * 1-5"
+
+    # 9:00 AM ET
+    - cron: "0 13 * * 1-5"
+
+    # 4:15 PM ET, after market close
+    - cron: "15 20 * * 1-5"
+
+  workflow_dispatch:
 
 jobs:
   run-screener:
