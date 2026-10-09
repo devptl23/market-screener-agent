@@ -12,7 +12,7 @@ from google.genai import types
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-pro-preview")
-GEMINI_FALLBACK_MODEL = os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash")
+GEMINI_FALLBACK_MODEL = os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-3.8-flash")
 
 
 def to_float(value):
@@ -168,6 +168,11 @@ def generate_trade_report(macro_favorable, macro_data, portfolio_data, candidate
                     "Gemini quota is exhausted for both "
                     f"{GEMINI_MODEL} and {GEMINI_FALLBACK_MODEL}. "
                     "Enable billing or wait for the quota to reset."
+                )
+            if fallback_status == 404:
+                return (
+                    f"Gemini fallback model {GEMINI_FALLBACK_MODEL} is unavailable. "
+                    "Set GEMINI_FALLBACK_MODEL to an available model."
                 )
             raise
 
