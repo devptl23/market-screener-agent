@@ -1,0 +1,30 @@
+name: Daily Pre-Market Sweep
+
+on:
+  schedule:
+    # 13:00 UTC corresponds to 9:00 AM EDT / 8:00 AM EST (Monday - Friday)
+    - cron: '0 13 * * 1-5'
+  workflow_dispatch: # Allows you to click a button and run it manually anytime
+
+jobs:
+  run-screener:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install yfinance requests google-genai
+
+      - name: Run Screener
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python screener.py
